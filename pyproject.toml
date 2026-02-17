@@ -5,7 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pyniri"
 version = "0.1.0"
-authors = [{ name = "Neo", email = "killown.matrix@gmail.com" }]
+authors = [{ name = "Thiago", email = "killown.matrix@gmail.com" }]
+license = { text = "GPL-3.0-or-later" }
 description = "Pythonic IPC bindings for the niri scroll-tiling compositor"
 readme = "README.md"
 requires-python = ">=3.13"
