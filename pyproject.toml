@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyniri"
+version = "0.1.0"
+authors = [{ name = "Neo", email = "killown.matrix@gmail.com" }]
+description = "Pythonic IPC bindings for the niri scroll-tiling compositor"
+readme = "README.md"
+requires-python = ">=3.13"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+]
+dependencies = ["pydantic>=2.0.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
