@@ -9,6 +9,7 @@
 import socket
 import json
 import os
+import typing
 from typing import Any, List, Optional, Dict, Union
 
 # --- Type Helpers & Enums ---
@@ -127,41 +128,145 @@ class NiriSocket:
 
         self.socket_path = socket_path
         self._timeout = 5.0
+        self._event_sock = None
 
     def _send(self, payload: Any) -> Any:
-        """Low-level socket communication matching niri's line-based JSON."""
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.settimeout(self._timeout)
                 client.connect(self.socket_path)
 
-                msg_str = json.dumps(payload) + "\n"
-                client.sendall(msg_str.encode("utf-8"))
+                msg = json.dumps(payload) + "\n"
+                client.sendall(msg.encode("utf-8"))
 
-                # Read until newline
-                buffer = b""
-                while True:
-                    chunk = client.recv(16384)  # 16KB buffer for large window lists
-                    if not chunk:
-                        break
-                    buffer += chunk
-                    if b"\n" in buffer:
-                        break
-
-                response = json.loads(buffer.decode("utf-8"))
+                with client.makefile("r", encoding="utf-8") as f:
+                    line = f.readline()
+                    if not line:
+                        raise NiriError("Empty response from compositor")
+                    response = json.loads(line)
 
                 if "Ok" in response:
                     return response["Ok"]
                 if "Err" in response:
-                    raise NiriError(f"Niri IPC Error: {response['Err']}")
+                    raise NiriError(f"Niri: {response['Err']}")
                 return response
-
-        except socket.error as e:
-            raise NiriError(f"Socket connection failed: {e}")
+        except (socket.error, json.JSONDecodeError) as e:
+            raise NiriError(f"IPC failure: {e}")
 
     def _action(self, name: str, **kwargs) -> bool:
-        """Wraps an Action variant into the Request::Action structure."""
-        return self._send({"Action": {name: kwargs}}) == "Handled"
+        payload = {"Action": {name: kwargs}} if kwargs else {"Action": name}
+        res = self._send(payload)
+        return res == "Handled" or res is None
+
+    # =========================================================================
+    # EVENT STREAMING (Watch)
+    # =========================================================================
+
+    def apply_event(self, event: Dict[str, Any]):
+        """
+        Applies a Niri event to the local state.
+        Implements the logic from the Rust EventStreamStatePart.
+        """
+        # --- Workspace State ---
+        if "WorkspacesChanged" in event:
+            self.workspaces = {
+                ws["id"]: ws for ws in event["WorkspacesChanged"]["workspaces"]
+            }
+
+        elif "WorkspaceActivated" in event:
+            active_id = event["WorkspaceActivated"]["id"]
+            focused = event["WorkspaceActivated"].get("focused", False)
+
+            # Find the output of the activated workspace
+            output = self.workspaces.get(active_id, {}).get("output")
+
+            for ws in self.workspaces.values():
+                if ws.get("output") == output:
+                    ws["is_active"] = ws["id"] == active_id
+                if focused:
+                    ws["is_focused"] = ws["id"] == active_id
+
+        # --- Window State ---
+        elif "WindowsChanged" in event:
+            self.windows = {
+                win["id"]: win for win in event["WindowsChanged"]["windows"]
+            }
+
+        elif "WindowOpenedOrChanged" in event:
+            win = event["WindowOpenedOrChanged"]["window"]
+            self.windows[win["id"]] = win
+            if win.get("is_focused"):
+                for w in self.windows.values():
+                    if w["id"] != win["id"]:
+                        w["is_focused"] = False
+
+        elif "WindowClosed" in event:
+            self.windows.pop(event["WindowClosed"]["id"], None)
+
+        elif "WindowFocusChanged" in event:
+            focused_id = event["WindowFocusChanged"].get("id")
+            for win in self.windows.values():
+                win["is_focused"] = win["id"] == focused_id
+
+        # --- Keyboard & UI State ---
+        elif "KeyboardLayoutsChanged" in event:
+            self.keyboard_layouts = event["KeyboardLayoutsChanged"]["keyboard_layouts"]
+
+        elif "KeyboardLayoutSwitched" in event:
+            if self.keyboard_layouts:
+                self.keyboard_layouts["current_idx"] = event["KeyboardLayoutSwitched"][
+                    "idx"
+                ]
+
+        elif "OverviewOpenedOrClosed" in event:
+            self.is_overview_open = event["OverviewOpenedOrClosed"]["is_open"]
+
+    # =========================================================================
+    # EVENT STREAMING (Watch)
+    # =========================================================================
+
+    def watch(self) -> typing.Generator[Dict[str, Any], None, None]:
+        """
+        Yields raw events from the Niri EventStream.
+        """
+        try:
+            self._event_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._event_sock.connect(self.socket_path)
+
+            payload = json.dumps("EventStream") + "\n"
+            self._event_sock.sendall(payload.encode("utf-8"))
+
+            f = self._event_sock.makefile("r", encoding="utf-8", buffering=1)
+
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if "Ok" in data:
+                    yield {"status": "connected", "raw": data}
+                elif "Handled" in data:
+                    continue
+                else:
+                    yield data
+
+        except socket.error as e:
+            raise NiriError(f"EventStream failed: {e}")
+        finally:
+            self.stop_watching()
+
+    def stop_watching(self):
+        if self._event_sock:
+            try:
+                self._event_sock.close()
+            except:
+                pass
+            self._event_sock = None
 
     # =========================================================================
     # REQUESTS (Information Retrieval)
