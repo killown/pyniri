@@ -136,8 +136,15 @@ class NiriSocket:
                 client.settimeout(self._timeout)
                 client.connect(self.socket_path)
 
-                msg = json.dumps(payload) + "\n"
-                client.sendall(msg.encode("utf-8"))
+                # Ensure payload is serialized then suffixed with newline
+                msg = json.dumps(payload)
+                if isinstance(msg, bytes):
+                    msg += b"\n"
+                else:
+                    msg += "\n"
+                    msg = msg.encode("utf-8")
+
+                client.sendall(msg)
 
                 with client.makefile("r", encoding="utf-8") as f:
                     line = f.readline()
@@ -145,18 +152,28 @@ class NiriSocket:
                         raise NiriError("Empty response from compositor")
                     response = json.loads(line)
 
-                if "Ok" in response:
-                    return response["Ok"]
-                if "Err" in response:
-                    raise NiriError(f"Niri: {response['Err']}")
+                if isinstance(response, dict):
+                    if "Ok" in response:
+                        return response["Ok"]
+                    if "Err" in response:
+                        raise NiriError(f"Niri: {response['Err']}")
+
                 return response
         except (socket.error, json.JSONDecodeError) as e:
             raise NiriError(f"IPC failure: {e}")
 
     def _action(self, name: str, **kwargs) -> bool:
+        """
+        Niri uses Enum-style variants.
+        Unit variants: {"Action": "ToggleOverview"}
+        Struct variants: {"Action": {"FocusWindow": {"id": 123}}}
+        """
         payload = {"Action": {name: kwargs}} if kwargs else {"Action": name}
-        res = self._send(payload)
-        return res == "Handled" or res is None
+        try:
+            res = self._send(payload)
+            return res == "Handled" or res is None
+        except NiriError:
+            return False
 
     # =========================================================================
     # EVENT STREAMING (Watch)
@@ -330,10 +347,26 @@ class NiriSocket:
     def power_on_monitors(self):
         return self._action("PowerOnMonitors")
 
-    def spawn(self, command: List[str]):
+    # --- System ---
+
+    def spawn(self, command: Union[List[str], str]) -> bool:
+        """
+        Spawns a process directly.
+        Safeguard: Automatically converts string input to the required List[str].
+        """
+        if isinstance(command, str):
+            command = command.split()
+
         return self._action("Spawn", command=command)
 
-    def spawn_sh(self, command: str):
+    def spawn_sh(self, command: Union[List[str], str]) -> bool:
+        """
+        Spawns a process through the shell (sh -c).
+        Safeguard: Automatically converts list input to the required String.
+        """
+        if isinstance(command, list):
+            command = " ".join(command)
+
         return self._action("SpawnSh", command=command)
 
     def do_screen_transition(self, delay_ms: Optional[int] = None):
@@ -522,7 +555,6 @@ class NiriSocket:
 
     # --- Layout & Tiling ---
     def switch_layout(self, layout: Union[str, Dict]):
-        # "next", "prev", or {"Index": 1}
         return self._action("SwitchLayout", layout=layout)
 
     def toggle_column_tabbed_display(self):
@@ -740,11 +772,23 @@ class NiriSocket:
     def switch_preset_window_height_back(self, id: Optional[int] = None):
         return self._action("SwitchPresetWindowHeightBack", id=id)
 
-    def maximize_column(self):
-        return self._action("MaximizeColumn")
+    # --- Maximization Actions ---
+
+    def maximize_column(self, id: Optional[int] = None):
+        """
+        Toggles the maximized state of a column.
+        If id is None, uses the focused column.
+        """
+        return self._action("MaximizeColumn", id=id)
 
     def maximize_window_to_edges(self, id: Optional[int] = None):
+        """
+        Toggles the maximized-to-edges state of a window.
+        If id is None, uses the focused window.
+        """
         return self._action("MaximizeWindowToEdges", id=id)
+
+    # ---------------------------------------------
 
     def set_column_width(self, change: Dict):
         return self._action("SetColumnWidth", change=change)
@@ -779,14 +823,26 @@ class NiriSocket:
         return self._action("StopCast", session_id=session_id)
 
     # --- Overview ---
-    def toggle_overview(self):
-        return self._action("ToggleOverview")
+    def toggle_overview(self) -> bool:
+        """
+        Toggle the Niri overview mode.
+        """
+        try:
+            return self._send({"Action": {"ToggleOverview": {}}}) == "Handled"
+        except NiriError:
+            return False
 
-    def open_overview(self):
-        return self._action("OpenOverview")
+    def open_overview(self) -> bool:
+        try:
+            return self._send({"Action": {"OpenOverview": {}}}) == "Handled"
+        except NiriError:
+            return False
 
-    def close_overview(self):
-        return self._action("CloseOverview")
+    def close_overview(self) -> bool:
+        try:
+            return self._send({"Action": {"CloseOverview": {}}}) == "Handled"
+        except NiriError:
+            return False
 
     # --- Helpers ---
 
