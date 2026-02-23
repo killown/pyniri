@@ -168,7 +168,7 @@ class NiriSocket:
         Unit variants: {"Action": "ToggleOverview"}
         Struct variants: {"Action": {"FocusWindow": {"id": 123}}}
         """
-        payload = {"Action": {name: kwargs}} if kwargs else {"Action": name}
+        payload = {"Action": {name: kwargs}}
         try:
             res = self._send(payload)
             return res == "Handled" or res is None
@@ -858,3 +858,18 @@ class NiriSocket:
             return WorkspaceReference.index(ref)
         if isinstance(ref, str):
             return WorkspaceReference.name(ref)
+
+    def get_cursor_position(self) -> Dict[str, float]:
+        """
+        Returns the current cursor position in absolute coordinates.
+        """
+        return self._send("CursorPosition")["CursorPosition"]
+
+    def move_cursor(self, x: float, y: float) -> bool:
+        """
+        Moves the cursor to absolute coordinates.
+        """
+        try:
+            return self._send({"MoveCursor": {"x": x, "y": y}}) == "Handled"
+        except NiriError:
+            return False
